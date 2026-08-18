@@ -35,6 +35,7 @@ def main():
     parser.add_argument("--count", type=int, default=200)
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--subject", default="sub-08")
+    parser.add_argument("--seed", type=int, default=None)
     args = parser.parse_args()
 
     ensure_repo_on_path()
@@ -67,9 +68,20 @@ def main():
 
     end = min(args.start + args.count, 200)
     for k in range(args.start, end):
-        h = pipe.generate(c_embeds=eeg_embeds_test[k : k + 1], num_inference_steps=50, guidance_scale=5.0)
+        prior_generator = None
+        if args.seed is not None:
+            prior_generator = torch.Generator(device=device).manual_seed(args.seed + k)
+        h = pipe.generate(
+            c_embeds=eeg_embeds_test[k : k + 1],
+            num_inference_steps=50,
+            guidance_scale=5.0,
+            generator=prior_generator,
+        )
         for j in range(args.repeats):
-            image = generator.generate(h.to(dtype=torch.float16))
+            image_generator = None
+            if args.seed is not None:
+                image_generator = torch.Generator(device=device).manual_seed(args.seed + k * 1000 + j)
+            image = generator.generate(h.to(dtype=torch.float16), generator=image_generator)
             path = output_root / names[k] / f"{j}.png"
             os.makedirs(path.parent, exist_ok=True)
             image.save(path)
