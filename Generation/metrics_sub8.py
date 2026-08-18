@@ -18,6 +18,13 @@ from path_config import DATA_ROOT, GENERATED_IMAGE_DIR, TEST_IMAGE_DIR
 IMAGE_EXTS = (".png", ".jpg", ".jpeg")
 
 
+def torch_checkpoint_dir():
+    torch_home = Path(os.environ.get("TORCH_HOME", Path.home() / ".cache" / "torch")).expanduser()
+    checkpoint_dir = torch_home / "hub" / "checkpoints"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    return checkpoint_dir
+
+
 def concept_name(folder):
     try:
         return folder[folder.index("_") + 1 :]
@@ -160,7 +167,7 @@ def build_deep_metrics(device):
     inception_model.eval().requires_grad_(False)
     inception_preprocess = lambda x: normalize_batch(resize_batch(x, 342), imagenet_mean, imagenet_std)
 
-    clip_model, _ = clip.load("ViT-L/14", device=device)
+    clip_model, _ = clip.load("ViT-L/14", device=device, download_root=str(torch_checkpoint_dir()))
     clip_model.eval().requires_grad_(False)
     clip_preprocess = lambda x: normalize_batch(
         resize_batch(x, 224),
