@@ -24,7 +24,9 @@ from sklearn.metrics import confusion_matrix
 from torch.utils.data import DataLoader, Dataset
 import random
 import sys
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from path_config import EEG_DATA_PATH, ensure_repo_on_path
+
+ensure_repo_on_path()
 from models.util import wandb_logger
 from braindecode.models import EEGNetv4, ATCNet, EEGConformer, EEGITNet, ShallowFBCSPNet
 import csv
@@ -509,7 +511,7 @@ import datetime
 def main():
     # Use argparse to parse the command-line arguments
     parser = argparse.ArgumentParser(description='EEG Transformer Training Script')
-    parser.add_argument('--data_path', type=str, default="/root/autodl-tmp/THINGS/Preprocessed_data_250Hz", help='Path to the EEG dataset')
+    parser.add_argument('--data_path', type=str, default=str(EEG_DATA_PATH), help='Path to the EEG dataset')
     parser.add_argument('--output_dir', type=str, default='./outputs/contrast', help='Directory to save output results')    
     parser.add_argument('--project', type=str, default="train_pos_img_text_rep", help='WandB project name')
     parser.add_argument('--entity', type=str, default="sustech_rethinkingbci", help='WandB entity name')

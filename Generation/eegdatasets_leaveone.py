@@ -20,17 +20,17 @@ import open_clip
 vlmodel, preprocess_train, feature_extractor = open_clip.create_model_and_transforms(
     model_type, pretrained='laion2b_s32b_b79k', precision='fp32', device = device)
 
-import json
+from path_config import (
+    CLIP_TEST_FEATURES,
+    CLIP_TRAIN_FEATURES,
+    EEG_DATA_PATH,
+    TEST_IMAGE_DIR,
+    TRAIN_IMAGE_DIR,
+)
 
-# Load the configuration from the JSON file
-config_path = "data_config.json"
-with open(config_path, "r") as config_file:
-    config = json.load(config_file)
-
-# Access the paths from the config
-data_path = config["data_path"]
-img_directory_training = config["img_directory_training"]
-img_directory_test = config["img_directory_test"]
+data_path = str(EEG_DATA_PATH)
+img_directory_training = str(TRAIN_IMAGE_DIR)
+img_directory_test = str(TEST_IMAGE_DIR)
 
 
 class EEGDataset():
@@ -59,9 +59,9 @@ class EEGDataset():
         
         if self.classes is None and self.pictures is None:
             # Try to load the saved features if they exist
-            features_filename = os.path.join(f'{model_type}_features_train.pt') if self.train else os.path.join(f'{model_type}_features_test.pt')
-            
-            if os.path.exists(features_filename) :
+            features_filename = CLIP_TRAIN_FEATURES if self.train else CLIP_TEST_FEATURES
+
+            if os.path.exists(features_filename):
                 saved_features = torch.load(features_filename)
                 self.text_features = saved_features['text_features']
                 self.img_features = saved_features['img_features']
@@ -379,7 +379,6 @@ class EEGDataset():
 
 if __name__ == "__main__":
     # Instantiate the dataset and dataloader
-    # data_path = "/home/ldy/Workspace/THINGS/EEG/osfstorage-archive"  # Replace with the path to your data
     data_path = data_path
     train_dataset = EEGDataset(data_path, subjects = ['sub-01'], train=True)    
     test_dataset = EEGDataset(data_path, subjects = ['sub-01'], train=False)
@@ -399,7 +398,3 @@ if __name__ == "__main__":
     x, label, text, text_features, img, img_features  = test_dataset[i]
     print(f"Index {i}, Label: {label}, text: {text}")
     Image.open(img)
-            
-    
-        
-    
