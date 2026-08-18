@@ -582,9 +582,7 @@ class Generator4Embeds:
         self.img2img_strength = img2img_strength
         self.low_level_image = low_level_image
         self.low_level_latent = low_level_latent
-        # path = '/home/weichen/.cache/huggingface/hub/models--stabilityai--sdxl-turbo/snapshots/f4b0486b498f84668e828044de1d0c8ba486e05b'
         pipe = DiffusionPipeline.from_pretrained("stabilityai/sdxl-turbo", torch_dtype=torch.bfloat16, variant="fp16")
-        # pipe = DiffusionPipeline.from_pretrained(path, torch_dtype=torch.bfloat16, variant="fp16")
         pipe.to(device)
         pipe.generate_ip_adapter_embeds = generate_ip_adapter_embeds.__get__(pipe)
         # load ip adapter
