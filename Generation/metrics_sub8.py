@@ -57,8 +57,7 @@ def load_ground_truth():
     return names, torch.stack(tensors)
 
 
-def load_reconstructions(names, subject, repeat):
-    root = GENERATED_IMAGE_DIR / subject
+def load_reconstructions(names, root, repeat):
     tensors = []
     missing = []
     for name in names:
@@ -214,6 +213,11 @@ def main():
     parser = argparse.ArgumentParser(description="Compute Subject-08 reconstruction metrics.")
     parser.add_argument("--device", default="cuda:0" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--subject", default="sub-08")
+    parser.add_argument(
+        "--generated-root",
+        default=None,
+        help="Generated image root. If omitted, use DATA_ROOT/generated_imgs/<subject>.",
+    )
     parser.add_argument("--repeats", type=int, default=10)
     parser.add_argument("--batch-size", type=int, default=16)
     parser.add_argument("--basic-only", action="store_true", help="Only compute PixCorr and SSIM.")
@@ -223,11 +227,13 @@ def main():
     device = torch.device(args.device)
     names, gt = load_ground_truth()
     print(f"Loaded {len(names)} ground-truth test images from {TEST_IMAGE_DIR}")
+    generated_root = Path(args.generated_root).expanduser() if args.generated_root else GENERATED_IMAGE_DIR / args.subject
+    print(f"Loaded generated images from {generated_root}")
 
     deep_metrics = {} if args.basic_only else build_deep_metrics(device)
     rows = []
     for repeat in tqdm(range(args.repeats), desc="repeats"):
-        recons = load_reconstructions(names, args.subject, repeat)
+        recons = load_reconstructions(names, generated_root, repeat)
         result = run_repeat(recons, gt, device, args.batch_size, deep_metrics)
         result["repeat"] = repeat
         rows.append(result)
