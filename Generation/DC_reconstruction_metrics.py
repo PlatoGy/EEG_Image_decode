@@ -16,6 +16,8 @@ from tqdm import tqdm
 
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg")
+DEFAULT_SWAV_REPO_DIR = "/data/gaoy/.cache/torch/hub/facebookresearch_swav_main"
+SWAV_CHECKPOINT = "swav_800ep_pretrain.pth.tar"
 
 
 def image_files(folder):
@@ -231,8 +233,20 @@ def efficientnet_metric(all_brain_recons, all_images, device, feature_batch_size
     return value
 
 
-def swav_metric(all_brain_recons, all_images, device, feature_batch_size):
-    model = torch.hub.load("facebookresearch/swav:main", "resnet50")
+def swav_metric(all_brain_recons, all_images, device, feature_batch_size, swav_repo_dir):
+    if not swav_repo_dir or not os.path.isdir(swav_repo_dir):
+        raise ValueError(
+            f"SwAV repo cache not found: {swav_repo_dir}. "
+            "Put facebookresearch/swav there or pass --swav-repo-dir."
+        )
+    torch_home = os.environ.get("TORCH_HOME", os.path.expanduser("~/.cache/torch"))
+    swav_checkpoint = Path(torch_home) / "hub" / "checkpoints" / SWAV_CHECKPOINT
+    if not swav_checkpoint.exists():
+        raise FileNotFoundError(
+            f"SwAV checkpoint cache not found: {swav_checkpoint}. "
+            "Download it first to avoid torch.hub using the network."
+        )
+    model = torch.hub.load(swav_repo_dir, "resnet50", source="local")
     model = create_feature_extractor(model, return_nodes=["avgpool"]).to(device)
     model.eval().requires_grad_(False)
     preprocess = transforms.Compose([
@@ -261,12 +275,13 @@ def parse_args():
     parser.add_argument(
         "--metrics",
         nargs="+",
-        default=["pixcorr", "ssim", "alexnet", "inception", "clip", "efficientnet", "swav"],
+        default=["pixcorr", "ssim", "alexnet", "inception", "clip", "efficientnet"],
         choices=["pixcorr", "ssim", "alexnet", "inception", "clip", "efficientnet", "swav"],
     )
     parser.add_argument("--hf-endpoint", default="https://hf-mirror.com")
     parser.add_argument("--hf-home", default="/data/gaoy/projects/.cache/huggingface")
     parser.add_argument("--torch-home", default="/data/gaoy/.cache/torch")
+    parser.add_argument("--swav-repo-dir", default=DEFAULT_SWAV_REPO_DIR)
     return parser.parse_args()
 
 
@@ -319,7 +334,13 @@ def main():
         results["EffNet-B"] = efficientnet_metric(all_brain_recons, all_images, device, args.feature_batch_size)
         print("EffNet-B:", results["EffNet-B"])
     if "swav" in args.metrics:
-        results["SwAV"] = swav_metric(all_brain_recons, all_images, device, args.feature_batch_size)
+        results["SwAV"] = swav_metric(
+            all_brain_recons,
+            all_images,
+            device,
+            args.feature_batch_size,
+            args.swav_repo_dir,
+        )
         print("SwAV:", results["SwAV"])
 
     with open(output_dir / "metrics.json", "w") as f:
