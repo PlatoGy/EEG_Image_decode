@@ -66,6 +66,7 @@ def collect_pairs(generated_dir, ground_truth_dir, repeats, image_size, start_in
     concepts = [p[0] for p in pairs]
     all_images = torch.stack([load_image_tensor(p[1], image_size) for p in pairs], dim=0)
     all_brain_recons = torch.stack([load_image_tensor(p[2], image_size) for p in pairs], dim=0)
+    assert len(all_images) == len(all_brain_recons), (len(all_images), len(all_brain_recons))
     return concepts, all_images, all_brain_recons
 
 
@@ -89,6 +90,7 @@ def two_way_identification(all_brain_recons, all_images, model, preprocess, feat
 
 
 def pixcorr_metric(all_brain_recons, all_images):
+    assert len(all_images) == len(all_brain_recons), (len(all_images), len(all_brain_recons))
     preprocess = transforms.Compose([
         transforms.Resize(425, interpolation=transforms.InterpolationMode.BILINEAR),
     ])
