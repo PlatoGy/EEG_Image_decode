@@ -1,5 +1,6 @@
 import argparse
 import csv
+import gc
 import json
 import os
 from pathlib import Path
@@ -71,15 +72,35 @@ def collect_pairs(generated_dir, ground_truth_dir, repeats, image_size, start_in
 
 
 @torch.no_grad()
-def two_way_identification(all_brain_recons, all_images, model, preprocess, feature_layer=None, device="cuda"):
-    preds = model(torch.stack([preprocess(recon) for recon in all_brain_recons], dim=0).to(device))
-    reals = model(torch.stack([preprocess(indiv) for indiv in all_images], dim=0).to(device))
-    if feature_layer is None:
-        preds = preds.float().flatten(1).cpu().numpy()
-        reals = reals.float().flatten(1).cpu().numpy()
-    else:
-        preds = preds[feature_layer].float().flatten(1).cpu().numpy()
-        reals = reals[feature_layer].float().flatten(1).cpu().numpy()
+def extract_model_features(images, model, preprocess, feature_layer, device, batch_size, desc):
+    features = []
+    for start in tqdm(range(0, len(images), batch_size), desc=desc):
+        end = min(start + batch_size, len(images))
+        batch = torch.stack([preprocess(image) for image in images[start:end]], dim=0).to(device)
+        outputs = model(batch)
+        if feature_layer is not None:
+            outputs = outputs[feature_layer]
+        features.append(outputs.float().flatten(1).cpu())
+        del batch, outputs
+    return torch.cat(features, dim=0).numpy()
+
+
+@torch.no_grad()
+def two_way_identification(
+    all_brain_recons,
+    all_images,
+    model,
+    preprocess,
+    feature_layer=None,
+    device="cuda",
+    batch_size=32,
+):
+    preds = extract_model_features(
+        all_brain_recons, model, preprocess, feature_layer, device, batch_size, "recon features"
+    )
+    reals = extract_model_features(
+        all_images, model, preprocess, feature_layer, device, batch_size, "gt features"
+    )
 
     r = np.corrcoef(reals, preds)
     r = r[:len(all_images), len(all_images):]
@@ -87,6 +108,12 @@ def two_way_identification(all_brain_recons, all_images, model, preprocess, feat
     success = r < congruents
     success_cnt = np.sum(success, 0)
     return np.mean(success_cnt) / (len(all_images) - 1)
+
+
+def cleanup_cuda():
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def pixcorr_metric(all_brain_recons, all_images):
@@ -131,7 +158,7 @@ def ssim_metric(all_brain_recons, all_images):
     return float(np.mean(scores))
 
 
-def alexnet_metrics(all_brain_recons, all_images, device):
+def alexnet_metrics(all_brain_recons, all_images, device, feature_batch_size):
     from torchvision.models import AlexNet_Weights, alexnet
 
     weights = AlexNet_Weights.IMAGENET1K_V1
@@ -144,12 +171,18 @@ def alexnet_metrics(all_brain_recons, all_images, device):
         transforms.Resize(256, interpolation=transforms.InterpolationMode.BILINEAR),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
-    alexnet2 = two_way_identification(all_brain_recons.to(device).float(), all_images, model, preprocess, "features.4", device)
-    alexnet5 = two_way_identification(all_brain_recons.to(device).float(), all_images, model, preprocess, "features.11", device)
+    alexnet2 = two_way_identification(
+        all_brain_recons, all_images, model, preprocess, "features.4", device, feature_batch_size
+    )
+    alexnet5 = two_way_identification(
+        all_brain_recons, all_images, model, preprocess, "features.11", device, feature_batch_size
+    )
+    del model
+    cleanup_cuda()
     return float(alexnet2), float(alexnet5)
 
 
-def inception_metric(all_brain_recons, all_images, device):
+def inception_metric(all_brain_recons, all_images, device, feature_batch_size):
     from torchvision.models import Inception_V3_Weights, inception_v3
 
     weights = Inception_V3_Weights.DEFAULT
@@ -159,10 +192,13 @@ def inception_metric(all_brain_recons, all_images, device):
         transforms.Resize(342, interpolation=transforms.InterpolationMode.BILINEAR),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
-    return float(two_way_identification(all_brain_recons, all_images, model, preprocess, "avgpool", device))
+    value = float(two_way_identification(all_brain_recons, all_images, model, preprocess, "avgpool", device, feature_batch_size))
+    del model
+    cleanup_cuda()
+    return value
 
 
-def clip_metric(all_brain_recons, all_images, device):
+def clip_metric(all_brain_recons, all_images, device, feature_batch_size):
     import clip
 
     clip_model, _ = clip.load("ViT-L/14", device=device)
@@ -171,10 +207,13 @@ def clip_metric(all_brain_recons, all_images, device):
         transforms.Resize(224, interpolation=transforms.InterpolationMode.BILINEAR),
         transforms.Normalize(mean=[0.48145466, 0.4578275, 0.40821073], std=[0.26862954, 0.26130258, 0.27577711]),
     ])
-    return float(two_way_identification(all_brain_recons, all_images, clip_model.encode_image, preprocess, None, device))
+    value = float(two_way_identification(all_brain_recons, all_images, clip_model.encode_image, preprocess, None, device, feature_batch_size))
+    del clip_model
+    cleanup_cuda()
+    return value
 
 
-def efficientnet_metric(all_brain_recons, all_images, device):
+def efficientnet_metric(all_brain_recons, all_images, device, feature_batch_size):
     from torchvision.models import EfficientNet_B1_Weights, efficientnet_b1
 
     weights = EfficientNet_B1_Weights.DEFAULT
@@ -184,12 +223,15 @@ def efficientnet_metric(all_brain_recons, all_images, device):
         transforms.Resize(255, interpolation=transforms.InterpolationMode.BILINEAR),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
-    gt = model(preprocess(all_images).to(device))["avgpool"].reshape(len(all_images), -1).cpu().numpy()
-    fake = model(preprocess(all_brain_recons).to(device))["avgpool"].reshape(len(all_brain_recons), -1).cpu().numpy()
-    return float(np.array([sp.spatial.distance.correlation(gt[i], fake[i]) for i in range(len(gt))]).mean())
+    gt = extract_model_features(all_images, model, preprocess, "avgpool", device, feature_batch_size, "gt features")
+    fake = extract_model_features(all_brain_recons, model, preprocess, "avgpool", device, feature_batch_size, "recon features")
+    value = float(np.array([sp.spatial.distance.correlation(gt[i], fake[i]) for i in range(len(gt))]).mean())
+    del model
+    cleanup_cuda()
+    return value
 
 
-def swav_metric(all_brain_recons, all_images, device):
+def swav_metric(all_brain_recons, all_images, device, feature_batch_size):
     model = torch.hub.load("facebookresearch/swav:main", "resnet50")
     model = create_feature_extractor(model, return_nodes=["avgpool"]).to(device)
     model.eval().requires_grad_(False)
@@ -197,9 +239,12 @@ def swav_metric(all_brain_recons, all_images, device):
         transforms.Resize(224, interpolation=transforms.InterpolationMode.BILINEAR),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
-    gt = model(preprocess(all_images).to(device))["avgpool"].reshape(len(all_images), -1).cpu().numpy()
-    fake = model(preprocess(all_brain_recons).to(device))["avgpool"].reshape(len(all_brain_recons), -1).cpu().numpy()
-    return float(np.array([sp.spatial.distance.correlation(gt[i], fake[i]) for i in range(len(gt))]).mean())
+    gt = extract_model_features(all_images, model, preprocess, "avgpool", device, feature_batch_size, "gt features")
+    fake = extract_model_features(all_brain_recons, model, preprocess, "avgpool", device, feature_batch_size, "recon features")
+    value = float(np.array([sp.spatial.distance.correlation(gt[i], fake[i]) for i in range(len(gt))]).mean())
+    del model
+    cleanup_cuda()
+    return value
 
 
 def parse_args():
@@ -212,6 +257,7 @@ def parse_args():
     parser.add_argument("--start-index", type=int, default=0)
     parser.add_argument("--num-concepts", type=int, default=200)
     parser.add_argument("--image-size", type=int, default=512)
+    parser.add_argument("--feature-batch-size", type=int, default=8)
     parser.add_argument(
         "--metrics",
         nargs="+",
@@ -243,8 +289,8 @@ def main():
         args.start_index,
         args.num_concepts,
     )
-    all_images = all_images.to(device)
-    all_brain_recons = all_brain_recons.to(device).to(all_images.dtype).clamp(0, 1)
+    all_images = all_images.float()
+    all_brain_recons = all_brain_recons.to(all_images.dtype).clamp(0, 1)
 
     print("pairs:", len(concepts))
     print("ground truth:", tuple(all_images.shape))
@@ -258,20 +304,22 @@ def main():
         results["SSIM"] = ssim_metric(all_brain_recons, all_images)
         print("SSIM:", results["SSIM"])
     if "alexnet" in args.metrics:
-        results["AlexNet(2)"], results["AlexNet(5)"] = alexnet_metrics(all_brain_recons, all_images, device)
+        results["AlexNet(2)"], results["AlexNet(5)"] = alexnet_metrics(
+            all_brain_recons, all_images, device, args.feature_batch_size
+        )
         print("AlexNet(2):", results["AlexNet(2)"])
         print("AlexNet(5):", results["AlexNet(5)"])
     if "inception" in args.metrics:
-        results["InceptionV3"] = inception_metric(all_brain_recons, all_images, device)
+        results["InceptionV3"] = inception_metric(all_brain_recons, all_images, device, args.feature_batch_size)
         print("InceptionV3:", results["InceptionV3"])
     if "clip" in args.metrics:
-        results["CLIP"] = clip_metric(all_brain_recons, all_images, device)
+        results["CLIP"] = clip_metric(all_brain_recons, all_images, device, args.feature_batch_size)
         print("CLIP:", results["CLIP"])
     if "efficientnet" in args.metrics:
-        results["EffNet-B"] = efficientnet_metric(all_brain_recons, all_images, device)
+        results["EffNet-B"] = efficientnet_metric(all_brain_recons, all_images, device, args.feature_batch_size)
         print("EffNet-B:", results["EffNet-B"])
     if "swav" in args.metrics:
-        results["SwAV"] = swav_metric(all_brain_recons, all_images, device)
+        results["SwAV"] = swav_metric(all_brain_recons, all_images, device, args.feature_batch_size)
         print("SwAV:", results["SwAV"])
 
     with open(output_dir / "metrics.json", "w") as f:
