@@ -134,3 +134,6 @@ Retrieval/wandb/
 .cache/
 tmp/
 temp/
+
+# Local run notes
+DC_SERVER_RUN_COMMANDS.md
