@@ -69,19 +69,20 @@ def load_img_features(path):
 def validate_training_inputs(eeg_features_train, raw_img_train, repeated_img_train, run_dir):
     expected_eeg_shape = (1654 * 10 * 4, 1024)
     expected_raw_img_shape = (1654 * 10, 1024)
+    errors = []
 
     if tuple(eeg_features_train.shape) != expected_eeg_shape:
-        raise ValueError(f"Expected train EEG embeddings {expected_eeg_shape}, got {tuple(eeg_features_train.shape)}")
+        errors.append(f"Expected train EEG embeddings {expected_eeg_shape}, got {tuple(eeg_features_train.shape)}")
     if tuple(raw_img_train.shape) != expected_raw_img_shape:
-        raise ValueError(f"Expected raw CLIP image targets {expected_raw_img_shape}, got {tuple(raw_img_train.shape)}")
+        errors.append(f"Expected raw CLIP image targets {expected_raw_img_shape}, got {tuple(raw_img_train.shape)}")
     if tuple(repeated_img_train.shape) != expected_eeg_shape:
-        raise ValueError(f"Expected repeated CLIP targets {expected_eeg_shape}, got {tuple(repeated_img_train.shape)}")
+        errors.append(f"Expected repeated CLIP targets {expected_eeg_shape}, got {tuple(repeated_img_train.shape)}")
 
     raw_norms = raw_img_train.norm(dim=1)
     repeated_norms = repeated_img_train.norm(dim=1)
     unit_like = torch.allclose(raw_norms, torch.ones_like(raw_norms), rtol=1e-3, atol=1e-3)
     if unit_like:
-        raise ValueError(
+        errors.append(
             "CLIP image targets look L2-normalized; expected raw/un-normalized features. "
             f"norm mean={raw_norms.mean().item():.6f}, std={raw_norms.std().item():.6f}"
         )
@@ -89,14 +90,14 @@ def validate_training_inputs(eeg_features_train, raw_img_train, repeated_img_tra
     expected_repeated = raw_img_train.repeat_interleave(4, dim=0)
     max_repeat_diff = (repeated_img_train - expected_repeated).abs().max().item()
     if max_repeat_diff != 0.0:
-        raise ValueError(
+        errors.append(
             "16540 -> 66160 target repeat is not sample-wise repeat_interleave(4). "
             f"max_abs_diff={max_repeat_diff}"
         )
 
-    print("strict check passed: train EEG embeddings", tuple(eeg_features_train.shape))
-    print("strict check passed: raw image CLIP targets", tuple(raw_img_train.shape))
-    print("strict check passed: repeated image CLIP targets", tuple(repeated_img_train.shape))
+    print("strict check: train EEG embeddings", tuple(eeg_features_train.shape))
+    print("strict check: raw image CLIP targets", tuple(raw_img_train.shape))
+    print("strict check: repeated image CLIP targets", tuple(repeated_img_train.shape))
     print(
         "raw target norm stats:",
         f"mean={raw_norms.mean().item():.6f}",
@@ -108,6 +109,7 @@ def validate_training_inputs(eeg_features_train, raw_img_train, repeated_img_tra
         "repeat alignment:",
         "sample i -> image_idx i//4 -> concept image_idx//10 -> image_in_concept image_idx%10 -> rep i%4",
     )
+    print("repeat max_abs_diff:", max_repeat_diff)
 
     pairing_path = run_dir / "pairing_check.csv"
     with open(pairing_path, "w", newline="") as f:
@@ -148,6 +150,8 @@ def validate_training_inputs(eeg_features_train, raw_img_train, repeated_img_tra
                 f"target_equal_raw={bool(target_equal)}",
             )
     print("saved pairing check:", pairing_path)
+    if errors:
+        raise ValueError("Strict training input check failed:\n" + "\n".join(f"- {error}" for error in errors))
 
 
 @torch.no_grad()
