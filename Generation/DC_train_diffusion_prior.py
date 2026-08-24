@@ -1,4 +1,5 @@
 import argparse
+import csv
 import json
 import os
 import random
@@ -8,6 +9,8 @@ from pathlib import Path
 
 import numpy as np
 import torch
+from torch import nn
+import torch.optim as optim
 from torch.utils.data import DataLoader
 
 
@@ -56,6 +59,128 @@ def make_target_img_embeddings(vit_train_features):
     return emb_img_train_4.float()
 
 
+def load_img_features(path):
+    obj = torch.load(path, map_location="cpu")
+    if isinstance(obj, dict):
+        obj = obj["img_features"]
+    return obj.float()
+
+
+@torch.no_grad()
+def prior_retrieval_metrics(pipe, eeg_features, img_features, device, num_samples, seed, prior_steps, guidance_scale):
+    n = min(num_samples, eeg_features.shape[0], img_features.shape[0])
+    eeg_features = eeg_features[:n].float().to(device)
+    img_features = img_features[:n].float().to(device)
+    outputs = []
+
+    for idx in range(n):
+        generator = torch.Generator(device=device).manual_seed(seed + idx)
+        h = pipe.generate(
+            c_embeds=eeg_features[idx:idx + 1],
+            num_inference_steps=prior_steps,
+            guidance_scale=guidance_scale,
+            generator=generator,
+        )
+        outputs.append(h.float().cpu())
+
+    outputs = torch.cat(outputs, dim=0).to(device)
+    paired_cosine = torch.nn.functional.cosine_similarity(outputs, img_features, dim=1).mean()
+    retrieval = outputs @ img_features.T
+    top1 = (retrieval.argmax(dim=1) == torch.arange(n, device=device)).float().mean()
+    return float(paired_cosine.item()), float(top1.item())
+
+
+def save_state_dict(pipe, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(pipe.diffusion_prior.state_dict(), path)
+
+
+def train_with_checkpoints(pipe, dataloader, args, run_dir, eval_data):
+    pipe.diffusion_prior.train()
+    device = pipe.device
+    criterion = nn.MSELoss(reduction="none")
+    optimizer = optim.Adam(pipe.diffusion_prior.parameters(), lr=args.lr)
+
+    from diffusers.optimization import get_cosine_schedule_with_warmup
+
+    lr_scheduler = get_cosine_schedule_with_warmup(
+        optimizer=optimizer,
+        num_warmup_steps=500,
+        num_training_steps=(len(dataloader) * args.epochs),
+    )
+    num_train_timesteps = pipe.scheduler.config.num_train_timesteps
+    ckpt_dir = run_dir / "checkpoints"
+    loss_csv = run_dir / "loss.csv"
+    eval_csv = run_dir / "prior_eval.csv"
+
+    with open(loss_csv, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["epoch_index", "epoch", "loss", "lr"])
+
+    if eval_data is not None:
+        with open(eval_csv, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(["epoch_index", "epoch", "split", "paired_cosine", "top1", "num_samples"])
+
+    for epoch_idx in range(args.epochs):
+        loss_sum = 0.0
+        pipe.diffusion_prior.train()
+        for batch in dataloader:
+            c_embeds = batch["c_embedding"].to(device) if "c_embedding" in batch.keys() else None
+            h_embeds = batch["h_embedding"].to(device)
+            n = h_embeds.shape[0]
+
+            if torch.rand(1) < 0.1:
+                c_embeds = None
+
+            noise = torch.randn_like(h_embeds)
+            timesteps = torch.randint(0, num_train_timesteps, (n,), device=device)
+            perturbed_h_embeds = pipe.scheduler.add_noise(h_embeds, noise, timesteps)
+            noise_pre = pipe.diffusion_prior(perturbed_h_embeds, timesteps, c_embeds)
+            loss = criterion(noise_pre, noise).mean()
+
+            optimizer.zero_grad()
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(pipe.diffusion_prior.parameters(), 1.0)
+            lr_scheduler.step()
+            optimizer.step()
+
+            loss_sum += loss.item()
+
+        loss_epoch = loss_sum / len(dataloader)
+        current_lr = optimizer.param_groups[0]["lr"]
+        print(f"epoch: {epoch_idx}, loss: {loss_epoch}")
+        with open(loss_csv, "a", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow([epoch_idx, epoch_idx + 1, loss_epoch, current_lr])
+
+        should_save = (epoch_idx + 1) % args.save_every == 0 or epoch_idx + 1 == args.epochs
+        if should_save:
+            save_state_dict(pipe, ckpt_dir / f"epoch_{epoch_idx + 1:03d}.pth")
+            save_state_dict(pipe, run_dir / "latest.pth")
+
+        if eval_data is not None and args.eval_every > 0 and (
+            (epoch_idx + 1) % args.eval_every == 0 or epoch_idx + 1 == args.epochs
+        ):
+            test_cos, test_top1 = prior_retrieval_metrics(
+                pipe,
+                eval_data["test_eeg"],
+                eval_data["test_img"],
+                device,
+                args.eval_num_samples,
+                args.seed,
+                args.eval_prior_steps,
+                args.eval_guidance_scale,
+            )
+            print(
+                f"eval epoch: {epoch_idx}, split: test, "
+                f"paired_cosine: {test_cos}, top1: {test_top1}"
+            )
+            with open(eval_csv, "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([epoch_idx, epoch_idx + 1, "test", test_cos, test_top1, args.eval_num_samples])
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Train diffusion prior from EEG embeddings to ViT-H image embeddings.")
     parser.add_argument("--data-root", default="/data/gaoy/projects/datasets/EEG_Image_decode")
@@ -84,6 +209,13 @@ def parse_args():
     parser.add_argument("--cond-dim", type=int, default=1024)
     parser.add_argument("--resume-prior-ckpt", default=None)
     parser.add_argument("--save-name", default="diffusion_prior.pt")
+    parser.add_argument("--save-every", type=int, default=10)
+    parser.add_argument("--eeg-test-embeds", default=None)
+    parser.add_argument("--vit-test-features", default=None)
+    parser.add_argument("--eval-every", type=int, default=0)
+    parser.add_argument("--eval-num-samples", type=int, default=200)
+    parser.add_argument("--eval-prior-steps", type=int, default=50)
+    parser.add_argument("--eval-guidance-scale", type=float, default=5.0)
     return parser.parse_args()
 
 
@@ -99,6 +231,7 @@ def main():
     seed_everything(args.seed)
 
     args.vit_train_features = args.vit_train_features or str(Path(args.data_root) / "ViT-H-14_features_train.pt")
+    args.vit_test_features = args.vit_test_features or str(Path(args.data_root) / "ViT-H-14_features_test.pt")
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     timestamp = args.run_name or datetime.now().strftime("%Y%m%d_%H%M%S")
     run_dir = Path(args.output_root) / args.subject / timestamp
@@ -131,10 +264,19 @@ def main():
         pipe.diffusion_prior.load_state_dict(torch.load(args.resume_prior_ckpt, map_location=device))
         print("loaded prior checkpoint:", args.resume_prior_ckpt)
 
-    pipe.train(dataloader, num_epochs=args.epochs, learning_rate=args.lr)
+    eval_data = None
+    if args.eeg_test_embeds is not None:
+        eval_data = {
+            "test_eeg": torch.load(args.eeg_test_embeds, map_location="cpu").float(),
+            "test_img": load_img_features(args.vit_test_features),
+        }
+        print("loaded EEG test embeddings for prior eval:", args.eeg_test_embeds, tuple(eval_data["test_eeg"].shape))
+        print("loaded image test embeddings for prior eval:", args.vit_test_features, tuple(eval_data["test_img"].shape))
+
+    train_with_checkpoints(pipe, dataloader, args, run_dir, eval_data)
 
     save_path = run_dir / args.save_name
-    torch.save(pipe.diffusion_prior.state_dict(), save_path)
+    save_state_dict(pipe, save_path)
     print("saved diffusion prior:", save_path)
     print("run_dir:", run_dir)
 
