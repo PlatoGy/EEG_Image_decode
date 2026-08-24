@@ -66,6 +66,90 @@ def load_img_features(path):
     return obj.float()
 
 
+def validate_training_inputs(eeg_features_train, raw_img_train, repeated_img_train, run_dir):
+    expected_eeg_shape = (1654 * 10 * 4, 1024)
+    expected_raw_img_shape = (1654 * 10, 1024)
+
+    if tuple(eeg_features_train.shape) != expected_eeg_shape:
+        raise ValueError(f"Expected train EEG embeddings {expected_eeg_shape}, got {tuple(eeg_features_train.shape)}")
+    if tuple(raw_img_train.shape) != expected_raw_img_shape:
+        raise ValueError(f"Expected raw CLIP image targets {expected_raw_img_shape}, got {tuple(raw_img_train.shape)}")
+    if tuple(repeated_img_train.shape) != expected_eeg_shape:
+        raise ValueError(f"Expected repeated CLIP targets {expected_eeg_shape}, got {tuple(repeated_img_train.shape)}")
+
+    raw_norms = raw_img_train.norm(dim=1)
+    repeated_norms = repeated_img_train.norm(dim=1)
+    unit_like = torch.allclose(raw_norms, torch.ones_like(raw_norms), rtol=1e-3, atol=1e-3)
+    if unit_like:
+        raise ValueError(
+            "CLIP image targets look L2-normalized; expected raw/un-normalized features. "
+            f"norm mean={raw_norms.mean().item():.6f}, std={raw_norms.std().item():.6f}"
+        )
+
+    expected_repeated = raw_img_train.repeat_interleave(4, dim=0)
+    max_repeat_diff = (repeated_img_train - expected_repeated).abs().max().item()
+    if max_repeat_diff != 0.0:
+        raise ValueError(
+            "16540 -> 66160 target repeat is not sample-wise repeat_interleave(4). "
+            f"max_abs_diff={max_repeat_diff}"
+        )
+
+    print("strict check passed: train EEG embeddings", tuple(eeg_features_train.shape))
+    print("strict check passed: raw image CLIP targets", tuple(raw_img_train.shape))
+    print("strict check passed: repeated image CLIP targets", tuple(repeated_img_train.shape))
+    print(
+        "raw target norm stats:",
+        f"mean={raw_norms.mean().item():.6f}",
+        f"std={raw_norms.std().item():.6f}",
+        f"min={raw_norms.min().item():.6f}",
+        f"max={raw_norms.max().item():.6f}",
+    )
+    print(
+        "repeat alignment:",
+        "sample i -> image_idx i//4 -> concept image_idx//10 -> image_in_concept image_idx%10 -> rep i%4",
+    )
+
+    pairing_path = run_dir / "pairing_check.csv"
+    with open(pairing_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow([
+            "sample_index",
+            "image_index",
+            "concept_index",
+            "image_in_concept",
+            "repetition_index",
+            "target_equal_raw_image",
+            "eeg_norm",
+            "target_norm",
+        ])
+        for sample_index in range(20):
+            image_index = sample_index // 4
+            concept_index = image_index // 10
+            image_in_concept = image_index % 10
+            repetition_index = sample_index % 4
+            target_equal = torch.equal(repeated_img_train[sample_index], raw_img_train[image_index])
+            writer.writerow([
+                sample_index,
+                image_index,
+                concept_index,
+                image_in_concept,
+                repetition_index,
+                bool(target_equal),
+                float(eeg_features_train[sample_index].norm().item()),
+                float(repeated_norms[sample_index].item()),
+            ])
+            print(
+                "PAIR",
+                f"sample={sample_index:03d}",
+                f"image_idx={image_index:04d}",
+                f"concept={concept_index:04d}",
+                f"image_in_concept={image_in_concept}",
+                f"rep={repetition_index}",
+                f"target_equal_raw={bool(target_equal)}",
+            )
+    print("saved pairing check:", pairing_path)
+
+
 @torch.no_grad()
 def prior_retrieval_metrics(pipe, eeg_features, img_features, device, num_samples, seed, prior_steps, guidance_scale):
     n = min(num_samples, eeg_features.shape[0], img_features.shape[0])
@@ -247,7 +331,9 @@ def main():
         torch.save(eeg_features_train, run_dir / f"ATM_S_eeg_features_{args.subject}_train.pt")
         print("extracted EEG train embeddings:", tuple(eeg_features_train.shape))
 
-    emb_img_train_4 = make_target_img_embeddings(args.vit_train_features)
+    raw_img_train = load_img_features(args.vit_train_features)
+    emb_img_train_4 = raw_img_train.view(1654, 10, 1, 1024).repeat(1, 1, 4, 1).view(-1, 1024)
+    validate_training_inputs(eeg_features_train, raw_img_train, emb_img_train_4, run_dir)
     if eeg_features_train.shape != emb_img_train_4.shape:
         raise ValueError(
             f"EEG/image embedding shape mismatch: {tuple(eeg_features_train.shape)} vs {tuple(emb_img_train_4.shape)}"
