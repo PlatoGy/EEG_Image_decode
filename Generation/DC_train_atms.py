@@ -87,31 +87,31 @@ class iTransformer(nn.Module):
         )
 
     def forward(self, x_enc, x_mark_enc, subject_ids=None):
-        enc_out = self.enc_embedding(x_enc, x_mark_enc, subject_ids)
-        enc_out, _ = self.encoder(enc_out, attn_mask=None)
-        return enc_out[:, :63, :]
+        enc_out = self.enc_embedding(x_enc, x_mark_enc, subject_ids)  # [B, 64, 250]: 63 EEG channel tokens + 1 subject token, time dim still 250
+        enc_out, _ = self.encoder(enc_out, attn_mask=None)  # [B, 64, 250]: self-attention over tokens, no time compression
+        return enc_out[:, :63, :]  # [B, 63, 250]: drop subject token, keep EEG channel tokens
 
 
 class PatchEmbedding(nn.Module):
     def __init__(self, emb_size=40):
         super().__init__()
         self.tsconv = nn.Sequential(
-            nn.Conv2d(1, 40, (1, 25), stride=(1, 1)),
-            nn.AvgPool2d((1, 51), (1, 5)),
-            nn.BatchNorm2d(40),
-            nn.ELU(),
-            nn.Conv2d(40, 40, (63, 1), stride=(1, 1)),
-            nn.BatchNorm2d(40),
-            nn.ELU(),
-            nn.Dropout(0.5),
+            nn.Conv2d(1, 40, (1, 25), stride=(1, 1)),  # [B, 1, 63, 250] -> [B, 40, 63, 226]: temporal conv, 250 -> 226
+            nn.AvgPool2d((1, 51), (1, 5)),  # [B, 40, 63, 226] -> [B, 40, 63, 36]: temporal pooling, 226 -> 36
+            nn.BatchNorm2d(40),  # [B, 40, 63, 36]: normalize feature maps, shape unchanged
+            nn.ELU(),  # [B, 40, 63, 36]: nonlinearity, shape unchanged
+            nn.Conv2d(40, 40, (63, 1), stride=(1, 1)),  # [B, 40, 63, 36] -> [B, 40, 1, 36]: fuse 63 EEG channels
+            nn.BatchNorm2d(40),  # [B, 40, 1, 36]: normalize feature maps, shape unchanged
+            nn.ELU(),  # [B, 40, 1, 36]: nonlinearity, shape unchanged
+            nn.Dropout(0.5),  # [B, 40, 1, 36]: regularization, shape unchanged
         )
         self.projection = nn.Sequential(
-            nn.Conv2d(40, emb_size, (1, 1), stride=(1, 1)),
-            Rearrange("b e (h) (w) -> b (h w) e"),
+            nn.Conv2d(40, emb_size, (1, 1), stride=(1, 1)),  # [B, 40, 1, 36] -> [B, 40, 1, 36]: 1x1 projection, emb_size=40
+            Rearrange("b e (h) (w) -> b (h w) e"),  # [B, 40, 1, 36] -> [B, 36, 40]: 36 temporal tokens, each 40-d
         )
 
     def forward(self, x: Tensor) -> Tensor:
-        return self.projection(self.tsconv(x.unsqueeze(1)))
+        return self.projection(self.tsconv(x.unsqueeze(1)))  # [B, 63, 250] -> [B, 1, 63, 250] -> [B, 36, 40]
 
 
 class ResidualAdd(nn.Module):
@@ -125,7 +125,7 @@ class ResidualAdd(nn.Module):
 
 class FlattenHead(nn.Sequential):
     def forward(self, x):
-        return x.contiguous().view(x.size(0), -1)
+        return x.contiguous().view(x.size(0), -1)  # [B, 36, 40] -> [B, 1440]: flatten temporal tokens
 
 
 class Enc_eeg(nn.Sequential):
@@ -136,15 +136,15 @@ class Enc_eeg(nn.Sequential):
 class Proj_eeg(nn.Sequential):
     def __init__(self, embedding_dim=1440, proj_dim=1024, drop_proj=0.5):
         super().__init__(
-            nn.Linear(embedding_dim, proj_dim),
+            nn.Linear(embedding_dim, proj_dim),  # [B, 1440] -> [B, 1024]: project to CLIP image embedding dim
             ResidualAdd(
                 nn.Sequential(
-                    nn.GELU(),
-                    nn.Linear(proj_dim, proj_dim),
-                    nn.Dropout(drop_proj),
+                    nn.GELU(),  # [B, 1024]: nonlinearity, shape unchanged
+                    nn.Linear(proj_dim, proj_dim),  # [B, 1024] -> [B, 1024]: residual MLP refinement
+                    nn.Dropout(drop_proj),  # [B, 1024]: regularization, shape unchanged
                 )
-            ),
-            nn.LayerNorm(proj_dim),
+            ),  # [B, 1024]: residual add, shape unchanged
+            nn.LayerNorm(proj_dim),  # [B, 1024]: normalize final EEG embedding
         )
 
 
@@ -170,9 +170,9 @@ class ATMS(nn.Module):
         self.loss_func = ClipLoss()
 
     def forward(self, x, subject_ids):
-        x = self.encoder(x, None, subject_ids)
-        eeg_embedding = self.enc_eeg(x)
-        return self.proj_eeg(eeg_embedding)
+        x = self.encoder(x, None, subject_ids)  # [B, 63, 250] -> [B, 63, 250]: iTransformer keeps time length
+        eeg_embedding = self.enc_eeg(x)  # [B, 63, 250] -> [B, 1440]: temporal compression to 36 tokens, then flatten
+        return self.proj_eeg(eeg_embedding)  # [B, 1440] -> [B, 1024]: final EEG embedding in CLIP space
 
 
 class FeatureDataset(Dataset):
