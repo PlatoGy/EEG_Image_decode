@@ -40,6 +40,12 @@ def collect_image_paths(image_dir):
     return folders, texts, images
 
 
+def model_input_dtype(model):
+    if hasattr(model, "visual") and hasattr(model.visual, "conv1"):
+        return model.visual.conv1.weight.dtype
+    return next(model.parameters()).dtype
+
+
 @torch.no_grad()
 def encode_texts(model, texts, device, batch_size):
     import clip
@@ -59,7 +65,7 @@ def encode_texts(model, texts, device, batch_size):
 @torch.no_grad()
 def encode_images(model, preprocess, image_paths, device, batch_size):
     features = []
-    dtype = next(model.parameters()).dtype
+    dtype = model_input_dtype(model)
     for start in tqdm(range(0, len(image_paths), batch_size), desc="image features"):
         batch_paths = image_paths[start:start + batch_size]
         image_inputs = torch.stack([
