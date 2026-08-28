@@ -509,7 +509,7 @@ class Generator4Embeds:
         pipe.set_ip_adapter_scale(1)
 
         if attention_slicing:
-            pipe.enable_attention_slicing()
+            print("Skipping attention slicing: diffusers IP-Adapter processors are incompatible with enable_attention_slicing().")
         if vae_slicing:
             pipe.enable_vae_slicing()
         if xformers:
