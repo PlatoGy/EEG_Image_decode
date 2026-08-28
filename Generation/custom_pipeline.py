@@ -1,3 +1,5 @@
+import torch
+
 from diffusers.pipelines.stable_diffusion_xl.pipeline_stable_diffusion_xl import *
 
 @torch.no_grad()
@@ -453,19 +455,50 @@ def encode_image(image, image_encoder, feature_extractor, num_images_per_prompt=
 
     return image_embeds
 
+def _cuda_gpu_id(device):
+    device = torch.device(device)
+    if device.type != "cuda":
+        return None
+    return 0 if device.index is None else device.index
+
+
+def _enable_cpu_offload(pipe, method_name, device):
+    gpu_id = _cuda_gpu_id(device)
+    method = getattr(pipe, method_name)
+    if gpu_id is None:
+        method()
+        return
+    try:
+        method(gpu_id=gpu_id)
+    except TypeError:
+        method()
+
+
 class Generator4Embeds:
 
-    def __init__(self, num_inference_steps=1, device='cuda') -> None:
+    def __init__(
+        self,
+        num_inference_steps=1,
+        device='cuda',
+        cpu_offload=False,
+        sequential_cpu_offload=False,
+        attention_slicing=False,
+        vae_slicing=False,
+        xformers=False,
+        height=None,
+        width=None,
+    ) -> None:
         # Note: Set http_proxy/https_proxy environment variables if needed
         self.num_inference_steps = num_inference_steps
         self.dtype = torch.float16
         self.device = device
+        self.height = height
+        self.width = width
         
         # path = '/home/weichen/.cache/huggingface/hub/models--stabilityai--sdxl-turbo/snapshots/f4b0486b498f84668e828044de1d0c8ba486e05b'
         # path = "/home/ldy/Workspace/sdxl-turbo/f4b0486b498f84668e828044de1d0c8ba486e05b"
         pipe = DiffusionPipeline.from_pretrained("stabilityai/sdxl-turbo", torch_dtype=torch.float16, variant="fp16")
         # pipe = DiffusionPipeline.from_pretrained(path, torch_dtype=torch.float16, variant="fp16")
-        pipe.to(device)
         pipe.generate_ip_adapter_embeds = generate_ip_adapter_embeds.__get__(pipe)
         # load ip adapter
         pipe.load_ip_adapter(
@@ -474,11 +507,31 @@ class Generator4Embeds:
             torch_dtype=torch.float16)
         # set ip_adapter scale (defauld is 1)
         pipe.set_ip_adapter_scale(1)
+
+        if attention_slicing:
+            pipe.enable_attention_slicing()
+        if vae_slicing:
+            pipe.enable_vae_slicing()
+        if xformers:
+            pipe.enable_xformers_memory_efficient_attention()
+
+        if sequential_cpu_offload:
+            _enable_cpu_offload(pipe, "enable_sequential_cpu_offload", device)
+        elif cpu_offload:
+            _enable_cpu_offload(pipe, "enable_model_cpu_offload", device)
+        else:
+            pipe.to(device)
+
         self.pipe = pipe
 
     def generate(self, image_embeds, text_prompt='', generator=None):
         image_embeds = image_embeds.to(device=self.device, dtype=self.dtype)
         pipe = self.pipe
+        size_kwargs = {}
+        if self.height is not None:
+            size_kwargs["height"] = self.height
+        if self.width is not None:
+            size_kwargs["width"] = self.width
 
         # generate image with image prompt - ip_adapter_embeds
         image = pipe.generate_ip_adapter_embeds(
@@ -487,6 +540,7 @@ class Generator4Embeds:
             num_inference_steps=self.num_inference_steps,
             guidance_scale=0.0,
             generator=generator,
+            **size_kwargs,
         ).images[0]
 
         return image
