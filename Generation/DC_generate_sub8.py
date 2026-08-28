@@ -296,6 +296,14 @@ def parse_args():
     parser.add_argument("--prior-steps", type=int, default=50)
     parser.add_argument("--prior-guidance-scale", type=float, default=5.0)
     parser.add_argument("--sdxl-steps", type=int, default=4)
+    parser.add_argument("--height", type=int, default=None)
+    parser.add_argument("--width", type=int, default=None)
+    parser.add_argument("--low-vram", action="store_true")
+    parser.add_argument("--cpu-offload", action="store_true")
+    parser.add_argument("--sequential-cpu-offload", action="store_true")
+    parser.add_argument("--attention-slicing", action="store_true")
+    parser.add_argument("--vae-slicing", action="store_true")
+    parser.add_argument("--xformers", action="store_true")
     parser.add_argument("--test-image-dir", default=None)
     return parser.parse_args()
 
@@ -337,7 +345,20 @@ def main():
     pipe.diffusion_prior.eval()
     print("loaded diffusion prior:", args.diffusion_prior_ckpt)
 
-    generator = Generator4Embeds(num_inference_steps=args.sdxl_steps, device=device)
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
+
+    generator = Generator4Embeds(
+        num_inference_steps=args.sdxl_steps,
+        device=device,
+        cpu_offload=args.cpu_offload or args.low_vram,
+        sequential_cpu_offload=args.sequential_cpu_offload,
+        attention_slicing=args.attention_slicing or args.low_vram,
+        vae_slicing=args.vae_slicing or args.low_vram,
+        xformers=args.xformers,
+        height=args.height,
+        width=args.width,
+    )
 
     end_index = min(args.start_index + args.num_concepts, len(concepts), eeg_features_test.shape[0])
     for k in range(args.start_index, end_index):
