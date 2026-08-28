@@ -345,6 +345,22 @@ def main():
     pipe.diffusion_prior.eval()
     print("loaded diffusion prior:", args.diffusion_prior_ckpt)
 
+    end_index = min(args.start_index + args.num_concepts, len(concepts), eeg_features_test.shape[0])
+    prior_embeds = []
+    with torch.no_grad():
+        for k in range(args.start_index, end_index):
+            prior_generator = torch.Generator(device=device).manual_seed(args.seed + k)
+            eeg_embeds = eeg_features_test[k : k + 1].to(device)
+            h = pipe.generate(
+                c_embeds=eeg_embeds,
+                num_inference_steps=args.prior_steps,
+                guidance_scale=args.prior_guidance_scale,
+                generator=prior_generator,
+            )
+            prior_embeds.append(h.detach().cpu())
+
+    del pipe
+    del diffusion_prior
     if device.type == "cuda":
         torch.cuda.empty_cache()
 
@@ -360,16 +376,8 @@ def main():
         width=args.width,
     )
 
-    end_index = min(args.start_index + args.num_concepts, len(concepts), eeg_features_test.shape[0])
-    for k in range(args.start_index, end_index):
-        prior_generator = torch.Generator(device=device).manual_seed(args.seed + k)
-        eeg_embeds = eeg_features_test[k : k + 1].to(device)
-        h = pipe.generate(
-            c_embeds=eeg_embeds,
-            num_inference_steps=args.prior_steps,
-            guidance_scale=args.prior_guidance_scale,
-            generator=prior_generator,
-        )
+    for offset, k in enumerate(range(args.start_index, end_index)):
+        h = prior_embeds[offset]
         for j in range(args.repeats):
             image_generator = torch.Generator(device=device).manual_seed(args.seed + k * 1000 + j)
             image = generator.generate(h.to(dtype=torch.float16), generator=image_generator)
