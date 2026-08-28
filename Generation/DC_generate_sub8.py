@@ -369,7 +369,7 @@ def main():
         device=device,
         cpu_offload=args.cpu_offload or args.low_vram,
         sequential_cpu_offload=args.sequential_cpu_offload,
-        attention_slicing=args.attention_slicing or args.low_vram,
+        attention_slicing=args.attention_slicing,
         vae_slicing=args.vae_slicing or args.low_vram,
         xformers=args.xformers,
         height=args.height,
