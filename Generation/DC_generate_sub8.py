@@ -296,14 +296,6 @@ def parse_args():
     parser.add_argument("--prior-steps", type=int, default=50)
     parser.add_argument("--prior-guidance-scale", type=float, default=5.0)
     parser.add_argument("--sdxl-steps", type=int, default=4)
-    parser.add_argument("--height", type=int, default=None)
-    parser.add_argument("--width", type=int, default=None)
-    parser.add_argument("--low-vram", action="store_true")
-    parser.add_argument("--cpu-offload", action="store_true")
-    parser.add_argument("--sequential-cpu-offload", action="store_true")
-    parser.add_argument("--attention-slicing", action="store_true")
-    parser.add_argument("--vae-slicing", action="store_true")
-    parser.add_argument("--xformers", action="store_true")
     parser.add_argument("--test-image-dir", default=None)
     return parser.parse_args()
 
@@ -345,39 +337,18 @@ def main():
     pipe.diffusion_prior.eval()
     print("loaded diffusion prior:", args.diffusion_prior_ckpt)
 
+    generator = Generator4Embeds(num_inference_steps=args.sdxl_steps, device=device)
+
     end_index = min(args.start_index + args.num_concepts, len(concepts), eeg_features_test.shape[0])
-    prior_embeds = []
-    with torch.no_grad():
-        for k in range(args.start_index, end_index):
-            prior_generator = torch.Generator(device=device).manual_seed(args.seed + k)
-            eeg_embeds = eeg_features_test[k : k + 1].to(device)
-            h = pipe.generate(
-                c_embeds=eeg_embeds,
-                num_inference_steps=args.prior_steps,
-                guidance_scale=args.prior_guidance_scale,
-                generator=prior_generator,
-            )
-            prior_embeds.append(h.detach().cpu())
-
-    del pipe
-    del diffusion_prior
-    if device.type == "cuda":
-        torch.cuda.empty_cache()
-
-    generator = Generator4Embeds(
-        num_inference_steps=args.sdxl_steps,
-        device=device,
-        cpu_offload=args.cpu_offload or args.low_vram,
-        sequential_cpu_offload=args.sequential_cpu_offload,
-        attention_slicing=args.attention_slicing,
-        vae_slicing=args.vae_slicing or args.low_vram,
-        xformers=args.xformers,
-        height=args.height,
-        width=args.width,
-    )
-
-    for offset, k in enumerate(range(args.start_index, end_index)):
-        h = prior_embeds[offset]
+    for k in range(args.start_index, end_index):
+        prior_generator = torch.Generator(device=device).manual_seed(args.seed + k)
+        eeg_embeds = eeg_features_test[k : k + 1].to(device)
+        h = pipe.generate(
+            c_embeds=eeg_embeds,
+            num_inference_steps=args.prior_steps,
+            guidance_scale=args.prior_guidance_scale,
+            generator=prior_generator,
+        )
         for j in range(args.repeats):
             image_generator = torch.Generator(device=device).manual_seed(args.seed + k * 1000 + j)
             image = generator.generate(h.to(dtype=torch.float16), generator=image_generator)
