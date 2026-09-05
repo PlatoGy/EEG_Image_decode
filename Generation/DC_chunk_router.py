@@ -185,7 +185,7 @@ class FixedChunkRouterPipe:
                 noise_pred_cond = self.diffusion_prior(h_t, t, c_t)
                 noise_pred_uncond = self.diffusion_prior(h_t, t, None)
                 noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_cond - noise_pred_uncond)
-            h_t = self.scheduler.step(noise_pred, t.long().item(), h_t, generator=generator).prev_sample
+            h_t = self.scheduler.step(noise_pred, int(timestep.item()), h_t, generator=generator).prev_sample
         return h_t
 
 
