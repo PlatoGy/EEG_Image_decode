@@ -19,6 +19,7 @@ for path in (str(GENERATION_DIR), str(REPO_ROOT)):
         sys.path.insert(0, path)
 
 from DC_dynamic_chunk_router import (
+    DYNAMIC_INIT_BOUNDARIES,
     DYNAMIC_INIT_CHUNKS,
     DynamicChunkATMS,
     make_dynamic_chunk_router_modules,
@@ -129,6 +130,8 @@ def save_dynamic_checkpoint(pipe, conditioner, path, mode, args, epoch=None):
                 "min_chunk_length": args.min_chunk_length,
                 "mask_temperature": args.mask_temperature,
                 "boundary_hidden_dim": args.boundary_hidden_dim,
+                "boundary_reg_weight": args.boundary_reg_weight,
+                "router_entropy_reg_weight": args.router_entropy_reg_weight,
             },
         },
         path,
@@ -188,6 +191,9 @@ def train_dynamic_chunk_router(args, run_dir, device):
     print("micro batch size:", args.batch_size)
     print("grad accum steps:", args.grad_accum_steps)
     print("effective batch size:", effective_batch_size)
+    print("boundary reg target:", DYNAMIC_INIT_BOUNDARIES)
+    print("boundary reg weight:", args.boundary_reg_weight)
+    print("router entropy reg weight:", args.router_entropy_reg_weight)
 
     if args.resume_prior_ckpt:
         load_resume_checkpoint(pipe, conditioner, args.resume_prior_ckpt, device)
@@ -207,6 +213,9 @@ def train_dynamic_chunk_router(args, run_dir, device):
             "epoch_index",
             "epoch",
             "loss",
+            "diffusion_loss",
+            "boundary_reg",
+            "router_entropy_penalty",
             "lr",
             "gamma",
             "b1_mean",
@@ -241,6 +250,8 @@ def train_dynamic_chunk_router(args, run_dir, device):
             optimizer,
             lr_scheduler,
             grad_accum_steps=args.grad_accum_steps,
+            boundary_reg_weight=args.boundary_reg_weight,
+            router_entropy_reg_weight=args.router_entropy_reg_weight,
         )
         lr = optimizer.param_groups[0]["lr"]
         gamma = float(stats["gamma"].item())
@@ -250,7 +261,9 @@ def train_dynamic_chunk_router(args, run_dir, device):
         router_weight_mean = tensor_values(stats["router_weight_mean"])
 
         print(
-            f"epoch: {epoch_idx}, loss: {stats['loss']}, gamma: {gamma}, "
+            f"epoch: {epoch_idx}, loss: {stats['loss']}, diffusion_loss: {stats['diffusion_loss']}, "
+            f"boundary_reg: {stats['boundary_reg']}, router_entropy_penalty: {stats['router_entropy_penalty']}, "
+            f"gamma: {gamma}, "
             f"b_mean: {boundary_mean}, b_std: {boundary_std}, "
             f"len_mean: {length_mean}, router_w_mean: {router_weight_mean}"
         )
@@ -259,6 +272,9 @@ def train_dynamic_chunk_router(args, run_dir, device):
                 epoch_idx,
                 epoch_idx + 1,
                 stats["loss"],
+                stats["diffusion_loss"],
+                stats["boundary_reg"],
+                stats["router_entropy_penalty"],
                 lr,
                 gamma,
                 *boundary_mean,
@@ -322,6 +338,8 @@ def parse_args():
     parser.add_argument("--min-chunk-length", type=float, default=20.0)
     parser.add_argument("--mask-temperature", type=float, default=2.0)
     parser.add_argument("--boundary-hidden-dim", type=int, default=128)
+    parser.add_argument("--boundary-reg-weight", type=float, default=1.0)
+    parser.add_argument("--router-entropy-reg-weight", type=float, default=0.01)
 
     parser.add_argument("--output-root", default="/data/gaoy/projects/datasets/EEG_Image_decode/runs/diffusion_prior")
     parser.add_argument("--run-name", default=None)

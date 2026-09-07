@@ -9,6 +9,7 @@ from DC_train_atms import ATMS
 
 
 DYNAMIC_INIT_CHUNKS = ((0, 63), (63, 125), (125, 188), (188, 250))
+DYNAMIC_INIT_BOUNDARIES = tuple(chunk[1] for chunk in DYNAMIC_INIT_CHUNKS[:-1])
 
 
 def freeze_module(module):
@@ -221,7 +222,16 @@ class DynamicChunkRouterPipe:
             condition_cache["z_chunks"].to(self.device),
         )
 
-    def train_epoch(self, dataloader, conditioner, optimizer, lr_scheduler, grad_accum_steps=1):
+    def train_epoch(
+        self,
+        dataloader,
+        conditioner,
+        optimizer,
+        lr_scheduler,
+        grad_accum_steps=1,
+        boundary_reg_weight=1.0,
+        router_entropy_reg_weight=0.01,
+    ):
         self.diffusion_prior.train()
         self.router_condition.train()
         conditioner.train()
@@ -230,8 +240,16 @@ class DynamicChunkRouterPipe:
         criterion = nn.MSELoss(reduction="none")
         num_train_timesteps = self.scheduler.config.num_train_timesteps
         grad_accum_steps = max(int(grad_accum_steps), 1)
+        fixed_boundaries = torch.tensor(DYNAMIC_INIT_BOUNDARIES, device=self.device, dtype=torch.float32)
+        sequence_length = float(conditioner.boundary_predictor.sequence_length)
+        num_chunks = float(conditioner.boundary_predictor.num_chunks)
+        max_entropy = torch.log(torch.tensor(num_chunks, device=self.device, dtype=torch.float32))
 
-        loss_sum = 0.0
+        total_loss_sum = 0.0
+        diffusion_loss_sum = 0.0
+        boundary_reg_sum = 0.0
+        router_entropy_penalty_sum = 0.0
+        router_entropy_penalty_count = 0
         boundary_values = []
         length_values = []
         router_weight_values = []
@@ -264,8 +282,18 @@ class DynamicChunkRouterPipe:
             else:
                 noise_pred = self.diffusion_prior(perturbed_h_embeds, timesteps, None)
 
-            loss = criterion(noise_pred, noise).mean()
-            (loss / accum_target).backward()
+            diffusion_loss = criterion(noise_pred, noise).mean()
+            boundary_reg = ((condition_cache["boundaries"] - fixed_boundaries) / sequence_length).pow(2).mean()
+            total_loss = diffusion_loss + float(boundary_reg_weight) * boundary_reg
+
+            if use_condition:
+                entropy = -(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(dim=1).mean()
+                router_entropy_penalty = 1.0 - entropy / max_entropy
+                total_loss = total_loss + float(router_entropy_reg_weight) * router_entropy_penalty
+                router_entropy_penalty_sum += router_entropy_penalty.detach().float().item()
+                router_entropy_penalty_count += 1
+
+            (total_loss / accum_target).backward()
             accum_count += 1
 
             if accum_count == accum_target:
@@ -278,7 +306,9 @@ class DynamicChunkRouterPipe:
                 optimizer.zero_grad(set_to_none=True)
                 accum_count = 0
 
-            loss_sum += loss.item()
+            total_loss_sum += total_loss.detach().float().item()
+            diffusion_loss_sum += diffusion_loss.detach().float().item()
+            boundary_reg_sum += boundary_reg.detach().float().item()
             boundary_values.append(condition_cache["boundaries"].detach().float().cpu())
             length_values.append(condition_cache["lengths"].detach().float().cpu())
 
@@ -291,7 +321,10 @@ class DynamicChunkRouterPipe:
             router_weight_mean = torch.full((4,), float("nan"))
 
         return {
-            "loss": loss_sum / len(dataloader),
+            "loss": total_loss_sum / len(dataloader),
+            "diffusion_loss": diffusion_loss_sum / len(dataloader),
+            "boundary_reg": boundary_reg_sum / len(dataloader),
+            "router_entropy_penalty": router_entropy_penalty_sum / max(router_entropy_penalty_count, 1),
             "boundary_mean": boundaries.mean(dim=0),
             "boundary_std": boundaries.std(dim=0, unbiased=False),
             "length_mean": lengths.mean(dim=0),
