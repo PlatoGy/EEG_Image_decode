@@ -158,6 +158,7 @@ def train_dynamic_chunk_router(args, run_dir, device):
 
     dataset = RawEEGToImageEmbeddingDataset(train_eeg, target_img_train, subject_id)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    effective_batch_size = args.batch_size * args.grad_accum_steps
 
     conditioner = DynamicChunkATMS(
         args.atms_ckpt,
@@ -184,11 +185,21 @@ def train_dynamic_chunk_router(args, run_dir, device):
     print("trainable boundary predictor trainable/total:", boundary_trainable, boundary_total)
     print("trainable diffusion prior trainable/total:", prior_trainable, prior_total)
     print("trainable router+gamma trainable/total:", router_trainable, router_total)
+    print("micro batch size:", args.batch_size)
+    print("grad accum steps:", args.grad_accum_steps)
+    print("effective batch size:", effective_batch_size)
 
     if args.resume_prior_ckpt:
         load_resume_checkpoint(pipe, conditioner, args.resume_prior_ckpt, device)
 
-    optimizer, lr_scheduler = make_dynamic_optimizer_and_scheduler(pipe, conditioner, dataloader, args.epochs, args.lr)
+    optimizer, lr_scheduler = make_dynamic_optimizer_and_scheduler(
+        pipe,
+        conditioner,
+        dataloader,
+        args.epochs,
+        args.lr,
+        grad_accum_steps=args.grad_accum_steps,
+    )
     loss_csv = run_dir / "loss.csv"
     eval_csv = run_dir / "prior_eval.csv"
     with open(loss_csv, "w", newline="") as f:
@@ -224,7 +235,13 @@ def train_dynamic_chunk_router(args, run_dir, device):
         test_img = load_img_features(args.vit_test_features)
 
     for epoch_idx in range(args.epochs):
-        stats = pipe.train_epoch(dataloader, conditioner, optimizer, lr_scheduler)
+        stats = pipe.train_epoch(
+            dataloader,
+            conditioner,
+            optimizer,
+            lr_scheduler,
+            grad_accum_steps=args.grad_accum_steps,
+        )
         lr = optimizer.param_groups[0]["lr"]
         gamma = float(stats["gamma"].item())
         boundary_mean = tensor_values(stats["boundary_mean"])
@@ -292,6 +309,7 @@ def parse_args():
 
     parser.add_argument("--epochs", type=int, default=150)
     parser.add_argument("--batch-size", type=int, default=1024)
+    parser.add_argument("--grad-accum-steps", type=int, default=1)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--dropout", type=float, default=0.1)

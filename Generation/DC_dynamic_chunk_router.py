@@ -139,7 +139,9 @@ class DynamicChunkATMS(nn.Module):
     def forward(self, eeg, subject_ids):
         eeg = eeg.to(self.device)
         subject_ids = subject_ids.to(self.device)
-        z_global = self.global_atms(eeg, subject_ids)
+        # 全局 ATMS 只提供 frozen 的 z_global，不需要把梯度传回 EEG 或 boundary predictor。
+        with torch.no_grad():
+            z_global = self.global_atms(eeg, subject_ids)
 
         boundaries, lengths = self.boundary_predictor(eeg)
         chunked, masks = self.masker(eeg, boundaries)
@@ -219,7 +221,7 @@ class DynamicChunkRouterPipe:
             condition_cache["z_chunks"].to(self.device),
         )
 
-    def train_epoch(self, dataloader, conditioner, optimizer, lr_scheduler):
+    def train_epoch(self, dataloader, conditioner, optimizer, lr_scheduler, grad_accum_steps=1):
         self.diffusion_prior.train()
         self.router_condition.train()
         conditioner.train()
@@ -227,13 +229,22 @@ class DynamicChunkRouterPipe:
         conditioner.chunk_atms.eval()
         criterion = nn.MSELoss(reduction="none")
         num_train_timesteps = self.scheduler.config.num_train_timesteps
+        grad_accum_steps = max(int(grad_accum_steps), 1)
 
         loss_sum = 0.0
         boundary_values = []
         length_values = []
         router_weight_values = []
+        accum_count = 0
+        accum_target = min(grad_accum_steps, len(dataloader))
 
-        for batch in dataloader:
+        optimizer.zero_grad(set_to_none=True)
+
+        for batch_idx, batch in enumerate(dataloader):
+            if accum_count == 0:
+                remaining_batches = len(dataloader) - batch_idx
+                accum_target = min(grad_accum_steps, remaining_batches)
+
             eeg = batch["eeg"].to(self.device)
             subject_ids = batch["subject_id"].to(self.device)
             h_embeds = batch["h_embedding"].to(self.device)
@@ -254,11 +265,18 @@ class DynamicChunkRouterPipe:
                 noise_pred = self.diffusion_prior(perturbed_h_embeds, timesteps, None)
 
             loss = criterion(noise_pred, noise).mean()
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(list(self.parameters()) + list(conditioner.boundary_predictor.parameters()), 1.0)
-            lr_scheduler.step()
-            optimizer.step()
+            (loss / accum_target).backward()
+            accum_count += 1
+
+            if accum_count == accum_target:
+                torch.nn.utils.clip_grad_norm_(
+                    list(self.parameters()) + list(conditioner.boundary_predictor.parameters()),
+                    1.0,
+                )
+                lr_scheduler.step()
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                accum_count = 0
 
             loss_sum += loss.item()
             boundary_values.append(condition_cache["boundaries"].detach().float().cpu())
@@ -310,13 +328,15 @@ def make_dynamic_chunk_router_modules(device, cond_dim=1024, dropout=0.1, init_g
     return DynamicChunkRouterPipe(diffusion_prior, router_condition, device=device)
 
 
-def make_dynamic_optimizer_and_scheduler(pipe, conditioner, dataloader, epochs, lr):
+def make_dynamic_optimizer_and_scheduler(pipe, conditioner, dataloader, epochs, lr, grad_accum_steps=1):
     params = list(pipe.parameters()) + list(conditioner.boundary_predictor.parameters())
     optimizer = optim.Adam(params, lr=lr)
     from diffusers.optimization import get_cosine_schedule_with_warmup
+    grad_accum_steps = max(int(grad_accum_steps), 1)
+    updates_per_epoch = (len(dataloader) + grad_accum_steps - 1) // grad_accum_steps
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=500,
-        num_training_steps=(len(dataloader) * epochs),
+        num_training_steps=(updates_per_epoch * epochs),
     )
     return optimizer, lr_scheduler
