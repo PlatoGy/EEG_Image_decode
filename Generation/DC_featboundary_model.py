@@ -211,6 +211,8 @@ class DiffusionTimeRouter(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, num_chunks),
         )
+        nn.init.zeros_(self.mlp[-1].weight)
+        nn.init.zeros_(self.mlp[-1].bias)
 
     def forward(self, timesteps):
         if timesteps.ndim == 0:
@@ -263,14 +265,20 @@ class FeatureBoundaryRouterPipe:
             condition_cache["z_chunks"].to(self.device),
         )
 
-    def train_epoch(self, dataloader, conditioner, optimizer, lr_scheduler):
+    def train_epoch(self, dataloader, conditioner, optimizer, lr_scheduler, router_entropy_reg_weight=0.0, freeze_router=False):
         self.diffusion_prior.train()
         self.router_condition.train()
         conditioner.eval()
+        for param in self.router_condition.router.parameters():
+            param.requires_grad_(not freeze_router)
         criterion = nn.MSELoss(reduction="none")
         num_train_timesteps = self.scheduler.config.num_train_timesteps
+        max_entropy = torch.log(torch.tensor(4.0, device=self.device))
 
         loss_sum = 0.0
+        diffusion_loss_sum = 0.0
+        router_entropy_penalty_sum = 0.0
+        router_entropy_penalty_count = 0
         boundary_values = []
         length_values = []
         score_peak_values = []
@@ -296,7 +304,15 @@ class FeatureBoundaryRouterPipe:
             else:
                 noise_pred = self.diffusion_prior(perturbed_h_embeds, timesteps, None)
 
-            loss = criterion(noise_pred, noise).mean()
+            diffusion_loss = criterion(noise_pred, noise).mean()
+            loss = diffusion_loss
+            if use_condition:
+                entropy = -(weights.clamp_min(1e-8) * weights.clamp_min(1e-8).log()).sum(dim=1).mean()
+                router_entropy_penalty = 1.0 - entropy / max_entropy
+                loss = loss + float(router_entropy_reg_weight) * router_entropy_penalty
+                router_entropy_penalty_sum += router_entropy_penalty.detach().float().item()
+                router_entropy_penalty_count += 1
+
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(list(self.parameters()), 1.0)
@@ -304,6 +320,7 @@ class FeatureBoundaryRouterPipe:
             optimizer.step()
 
             loss_sum += loss.item()
+            diffusion_loss_sum += diffusion_loss.detach().float().item()
             boundary_values.append(condition_cache["boundaries"].detach().float().cpu())
             length_values.append(condition_cache["lengths"].detach().float().cpu())
             score_peak_values.append(condition_cache["score_peaks"].detach().float().cpu())
@@ -319,6 +336,8 @@ class FeatureBoundaryRouterPipe:
 
         return {
             "loss": loss_sum / len(dataloader),
+            "diffusion_loss": diffusion_loss_sum / len(dataloader),
+            "router_entropy_penalty": router_entropy_penalty_sum / max(router_entropy_penalty_count, 1),
             "boundary_mean": boundaries.mean(dim=0),
             "boundary_std": boundaries.std(dim=0, unbiased=False),
             "length_mean": lengths.mean(dim=0),

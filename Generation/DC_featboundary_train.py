@@ -129,6 +129,8 @@ def save_checkpoint(pipe, path, mode, args, epoch=None):
                 "init_boundaries": FEATBOUNDARY_BOUNDARIES,
                 "min_chunk_length": args.min_chunk_length,
                 "smoothing_kernel": args.smoothing_kernel,
+                "router_entropy_reg_weight": args.router_entropy_reg_weight,
+                "freeze_router_epochs": args.freeze_router_epochs,
             },
         },
         path,
@@ -183,6 +185,8 @@ def train_featboundary_router(args, run_dir, device):
     print("fixed reference chunks:", FEATBOUNDARY_CHUNKS)
     print("feature-boundary min chunk length:", args.min_chunk_length)
     print("feature-boundary smoothing kernel:", args.smoothing_kernel)
+    print("router entropy reg weight:", args.router_entropy_reg_weight)
+    print("freeze router epochs:", args.freeze_router_epochs)
 
     if args.resume_prior_ckpt:
         load_resume_checkpoint(pipe, args.resume_prior_ckpt, device)
@@ -195,8 +199,11 @@ def train_featboundary_router(args, run_dir, device):
             "epoch_index",
             "epoch",
             "loss",
+            "diffusion_loss",
+            "router_entropy_penalty",
             "lr",
             "gamma",
+            "router_frozen",
             "b1_mean",
             "b2_mean",
             "b3_mean",
@@ -230,7 +237,15 @@ def train_featboundary_router(args, run_dir, device):
         test_img = load_img_features(args.vit_test_features)
 
     for epoch_idx in range(args.epochs):
-        stats = pipe.train_epoch(dataloader, conditioner, optimizer, lr_scheduler)
+        router_frozen = epoch_idx < args.freeze_router_epochs
+        stats = pipe.train_epoch(
+            dataloader,
+            conditioner,
+            optimizer,
+            lr_scheduler,
+            router_entropy_reg_weight=args.router_entropy_reg_weight,
+            freeze_router=router_frozen,
+        )
         lr = optimizer.param_groups[0]["lr"]
         gamma = float(stats["gamma"].item())
         boundary_mean = tensor_values(stats["boundary_mean"])
@@ -241,7 +256,9 @@ def train_featboundary_router(args, run_dir, device):
         router_weight_mean = tensor_values(stats["router_weight_mean"])
 
         print(
-            f"epoch: {epoch_idx}, loss: {stats['loss']}, gamma: {gamma}, "
+            f"epoch: {epoch_idx}, loss: {stats['loss']}, diffusion_loss: {stats['diffusion_loss']}, "
+            f"router_entropy_penalty: {stats['router_entropy_penalty']}, gamma: {gamma}, "
+            f"router_frozen: {router_frozen}, "
             f"b_mean: {boundary_mean}, b_std: {boundary_std}, "
             f"len_mean: {length_mean}, len_std: {length_std}, "
             f"score_peak_mean: {score_peak_mean}, router_w_mean: {router_weight_mean}"
@@ -251,8 +268,11 @@ def train_featboundary_router(args, run_dir, device):
                 epoch_idx,
                 epoch_idx + 1,
                 stats["loss"],
+                stats["diffusion_loss"],
+                stats["router_entropy_penalty"],
                 lr,
                 gamma,
+                int(router_frozen),
                 *boundary_mean,
                 *boundary_std,
                 *length_mean,
@@ -307,6 +327,8 @@ def parse_args():
 
     parser.add_argument("--min-chunk-length", type=int, default=20)
     parser.add_argument("--smoothing-kernel", type=int, default=5)
+    parser.add_argument("--router-entropy-reg-weight", type=float, default=0.01)
+    parser.add_argument("--freeze-router-epochs", type=int, default=20)
 
     parser.add_argument("--output-root", default="/data/gaoy/projects/datasets/EEG_Image_decode/runs/diffusion_prior")
     parser.add_argument("--run-name", default=None)
